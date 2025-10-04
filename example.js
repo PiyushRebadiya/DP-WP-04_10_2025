@@ -1,690 +1,1289 @@
-const { Client, Location, Poll, List, Buttons, LocalAuth } = require('./index');
+const {
+    Client,
+    Location,
+    Poll,
+    List,
+    Buttons,
+    LocalAuth,
+    MessageMedia,
+} = require("./index");
+
+const express = require("express");
+const bodyParser = require("body-parser");
+const sharp = require("sharp");
+const { createCanvas, loadImage, registerFont } = require("canvas");
+const axios = require("axios");
+const fs = require("fs");
+const path = require("path");
+const moment = require("moment");
+const { connectDB, getPool } = require("./config/database");
+const { exec } = require("child_process");
+
+const app = express();
+const PORT = process.env.PORT || 8080;
+
+app.use(bodyParser.json({ limit: "10mb" }));
+app.use(express.static("public"));
+app.use(express.static(path.join(__dirname, 'media')));
+
+const fontsDir = path.join(__dirname, "fonts");
+
+const fontMap = {
+    English: {
+        Arimo: { folder: "Arimo", prefix: "Arimo", family: "Arimo" },
+        Asimovian: { folder: "Asimovian", prefix: "Asimovian", family: "Asimovian" },
+        DM_Sans: { folder: "DM_Sans", prefix: "DM Sans", family: "DM Sans" },
+        Epunda_Sans: { folder: "Epunda_Sans", prefix: "Epunda Sans", family: "EpundaSans" },
+        Epunda_Slab: { folder: "Epunda_Slab", prefix: "EpundaSlab", family: "EpundaSlab" },
+        Jost: { folder: "Jost", prefix: "Jost", family: "Jost" },
+        Kode_Mono: { folder: "Kode_Mono", prefix: "Kode Mono", family: "KodeMono" },
+        Montserrat: { folder: "Montserrat", prefix: "Montserrat", family: "Montserrat" },
+        Noto_Serif: { folder: "Noto_Serif", prefix: "NotoSerif", family: "NotoSerif" },
+        Open_Sans: { folder: "Open_Sans", prefix: "OpenSans", family: "OpenSans" },
+        Raleway: { folder: "Raleway", prefix: "Raleway", family: "Raleway" },
+        Roboto: { folder: "Roboto", prefix: "Roboto", family: "Roboto" },
+        Story_Script: { folder: "Story_Script", prefix: "StoryScript", family: "StoryScript" },
+        Ubuntu: { folder: "Ubuntu", prefix: "Ubuntu", family: "Ubuntu" },
+        Inter: { folder: "Inter", prefix: "Inter", family: "Inter" },
+    },
+    Gujarati: {
+        Anek_Gujarati: { folder: "Anek_Gujarati", prefix: "AnekGujarati", family: "Anek Gujarati" },
+    },
+    Hindi: {
+        Baloo2: { folder: "Baloo2", prefix: "Baloo2", family: "Baloo 2" },
+        Hind: { folder: "Hind", prefix: "Hind", family: "Hind" },
+    },
+    Marathi: {
+        Hind: { folder: "Hind", prefix: "Hind", family: "Hind" }, // reuse Hindi Hind
+    },
+};
+
+// ✅ Common styles by default
+const defaultStyles = [
+    "Regular",
+    "Bold",
+    "Italic",
+    "BoldItalic",
+    "Light",
+    "LightItalic",
+    "SemiBold",
+    "SemiBoldItalic",
+];
+
+// ✅ Register fonts
+for (const [lang, families] of Object.entries(fontMap)) {
+    for (const [key, meta] of Object.entries(families)) {
+        const dir = path.join(fontsDir, lang, meta.folder);
+
+        (meta.styles || defaultStyles).forEach((style) => {
+            const fileName = `${meta.prefix}-${style}.ttf`; // e.g. DM Sans-Regular.ttf
+            const filePath = path.join(dir, fileName);
+
+            if (fs.existsSync(filePath)) {
+                const familyName = `${meta.family} ${style.replace(/([A-Z])/g, " $1").trim()}`;
+                registerFont(filePath, { family: familyName });
+                console.log(`✅ Registered: ${familyName}`);
+            } else {
+                console.warn(`⚠️ Missing font file: ${filePath}`);
+            }
+        });
+    }
+}
+
+app.use("/", express.static(path.join(__dirname, "./media/static")));
+app.use("/", express.static(path.join(__dirname, "./media")));
+// Optional: Register custom fonts if needed
+// registerFont('./fonts/Chrusty Rock d.ttf', { family: 'CustomFont' });
+
+// Load image from a URL as buffer
+async function loadImageFromUrl(url) {
+    try {
+        const response = await axios.get(url, { responseType: "arraybuffer" });
+        return Buffer.from(response.data, "binary");
+    } catch (error) {
+        console.error("Error loading image from URL:", url, error);
+        throw error;
+    }
+}
+
+
+function getFontString(element) {
+
+    fontName = String(element.fontFamily || "").trim();
+
+    let style = "normal"; // italic / normal
+    let weight = "normal"; // bold / 100–900
+    let family = fontName;
+
+    // Handle Italic
+    if (fontName.toLowerCase().includes("italic")) {
+        style = "italic";
+        family = family.replace(/italic/i, "").trim();
+    }
+
+    // Handle weights
+    if (/semibold/i.test(fontName)) {
+        weight = "600";
+        family = family.replace(/semibold/i, "").trim();
+    } else if (/bold/i.test(fontName)) {
+        weight = "bold";
+        family = family.replace(/bold/i, "").trim();
+    } else if (/light/i.test(fontName)) {
+        weight = "300";
+        family = family.replace(/light/i, "").trim();
+    } else if (/regular/i.test(fontName)) {
+        weight = "normal";
+        family = family.replace(/regular/i, "").trim();
+    }
+
+    // Clean up spaces
+    family = family.replace(/\s+/g, " ").trim();
+    const size = element.size || 24;
+
+    return `${style} ${weight} ${size}px '${family}'`;
+}
+
+function wrapTextWithDirection(context, text, x, y, maxWidth, lineHeight, direction = "left", measureOnly = false) {
+    const words = text.split(' ');
+    let line = '';
+    let testLine = '';
+    let lineCount = 0;
+
+    for (let n = 0; n < words.length; n++) {
+        testLine = line + words[n] + ' ';
+        const metrics = context.measureText(testLine);
+        const testWidth = metrics.width;
+
+        if (testWidth > maxWidth && n > 0) {
+            if (!measureOnly) {
+                const drawX = direction === 'right' ? x - context.measureText(line).width : x;
+                context.fillText(line, drawX, y);
+            }
+            line = words[n] + ' ';
+            y += lineHeight;
+            lineCount++;
+        } else {
+            line = testLine;
+        }
+    }
+
+    if (!measureOnly) {
+        const drawX = direction === 'right' ? x - context.measureText(line).width : x;
+        context.fillText(line, drawX, y);
+    }
+    return lineCount + 1;
+}
 
 const client = new Client({
     authStrategy: new LocalAuth(),
     // proxyAuthentication: { username: 'username', password: 'password' },
-    /**
-     * This option changes the browser name from defined in user agent to custom.
-     */
-    // deviceName: 'Your custom name',
-    /**
-     * This option changes browser type from defined in user agent to yours. It affects the browser icon
-     * that is displayed in 'linked devices' section.
-     * Valid value are: 'Chrome' | 'Firefox' | 'IE' | 'Opera' | 'Safari' | 'Edge'.
-     * If another value is provided, the browser icon in 'linked devices' section will be gray.
-     */
-    // browserName: 'Firefox',
-    puppeteer: { 
+    puppeteer: {
         // args: ['--proxy-server=proxy-server-that-requires-authentication.example.com'],
         headless: false,
+        executablePath: 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe'
     },
-    // pairWithPhoneNumber: {
-    //     phoneNumber: '96170100100' // Pair with phone number (format: <COUNTRY_CODE><PHONE_NUMBER>)
-    //     showNotification: true,
-    //     intervalMs: 180000 // Time to renew pairing code in milliseconds, defaults to 3 minutes
-    // }
 });
 
 // client initialize does not finish at ready now.
 client.initialize();
 
-client.on('loading_screen', (percent, message) => {
-    console.log('LOADING SCREEN', percent, message);
+app.get("/", (req, res) => {
+    res.send("Hello World!");
 });
 
-client.on('qr', async (qr) => {
+app.get("/send", async (req, res) => {
+    try {
+        const { mobile, message } = req.query;
+
+        // Validate inputs
+        if (!mobile || !message) {
+            return res
+                .status(400)
+                .send("Mobile number and message are required");
+        }
+
+        // Format the mobile number correctly
+        const formattedMobile = mobile.includes("@c.us")
+            ? mobile
+            : `${mobile.replace(/[^0-9]/g, "")}@c.us`;
+
+        // Check if user is registered
+        const verifyClient = await client.isRegisteredUser(formattedMobile);
+        if (!verifyClient) {
+            return res.status(200).send("Not Registered To WhatsApp");
+        }
+
+        // Send message
+        const sendMessageToClient = await client.sendMessage(
+            formattedMobile,
+            message
+        );
+        return res.status(200).send(sendMessageToClient);
+    } catch (error) {
+        console.error("Error sending message:", error);
+        return res.status(500).send(error.message || "Internal Server Error");
+    }
+});
+
+app.get("/send-media", async (req, res) => {
+    try {
+        const { mobile, filename, caption } = req.query;
+
+        // Validate inputs
+        if (!mobile || !filename) {
+            return res
+                .status(400)
+                .send("Mobile number and filename are required");
+        }
+
+        // Format the mobile number correctly
+        const formattedMobile = mobile.includes("@c.us")
+            ? mobile
+            : `${mobile.replace(/[^0-9]/g, "")}@c.us`;
+
+        // Check if user is registered
+        const isRegistered = await client.isRegisteredUser(formattedMobile);
+        if (!isRegistered) {
+            return res.status(200).send("Not Registered To WhatsApp");
+        }
+
+        // Construct file path
+        const filePath = path.join(__dirname, "media", filename);
+
+        // Create media message
+        const media = MessageMedia.fromFilePath(filePath);
+
+        // Send media with optional caption
+        const options = caption ? { caption: caption } : {};
+        const sentMessage = await client.sendMessage(
+            formattedMobile,
+            media,
+            options
+        );
+
+        return res.status(200).json({
+            status: "success",
+            message: "Media sent successfully",
+            data: sentMessage,
+        });
+    } catch (error) {
+        console.error("Error sending media:", error);
+        return res.status(500).json({
+            status: "error",
+            message: error.message || "Failed to send media",
+        });
+    }
+});
+
+// FFmpeg configuration
+const ffmpegPath = `C:\\Users\\Admin\\AppData\\Local\\Microsoft\\WinGet\\Packages\\Gyan.FFmpeg_Microsoft.Winget.Source_8wekyb3d8bbwe\\ffmpeg-7.1.1-full_build\\bin\\ffmpeg.exe`; // Adjust this path
+const mediaDir = path.join(__dirname, "media");
+const outputDir = path.join(__dirname, "temp_output");
+
+// Ensure directories exist
+[mediaDir, outputDir].forEach(dir => {
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+});
+
+// Modified processVideoWithFrame function to remove white background from frame
+async function processVideoWithFrame(videoUrl, frameUrl) {
+    try {
+        // Ensure directories exist
+        if (!fs.existsSync(mediaDir)) fs.mkdirSync(mediaDir);
+        if (!fs.existsSync(outputDir)) fs.mkdirSync(outputDir);
+
+        // Download video and frame
+        const [videoResponse, frameResponse] = await Promise.all([
+            axios.get(videoUrl, { responseType: 'arraybuffer' }),
+            axios.get(frameUrl, { responseType: 'arraybuffer' })
+        ]);
+
+        // Save files temporarily
+        const videoPath = path.join(mediaDir, `input_video_${Date.now()}.mp4`);
+        const framePath = path.join(mediaDir, `frame_${Date.now()}.png`);
+        fs.writeFileSync(videoPath, videoResponse.data);
+        fs.writeFileSync(framePath, frameResponse.data);
+
+        // Process with FFmpeg - Remove white background and overlay
+        const outputPath = path.join(outputDir, `framed_${Date.now()}.mp4`);
+        const ffmpegCommand = `${ffmpegPath} -i "${videoPath}" -i "${framePath}" ` +
+            `-filter_complex "[1:v]format=rgba[frame];[0:v][frame]overlay=0:0:format=auto" ` +
+            `-c:v libx264 -profile:v main -pix_fmt yuv420p -c:a aac -b:a 128k -movflags +faststart -f mp4 "${outputPath}"`;
+
+        await new Promise((resolve, reject) => {
+            exec(ffmpegCommand, (error, stdout, stderr) => {
+                if (error) {
+                    console.error('FFmpeg stderr:', stderr);
+                    reject(new Error(`FFmpeg error: ${error.message}`));
+                }
+                resolve();
+            });
+        });
+
+        // Verify the output file exists and is not empty
+        if (!fs.existsSync(outputPath) || fs.statSync(outputPath).size === 0) {
+            throw new Error('FFmpeg failed to produce a valid output file.');
+        }
+
+        // Read the processed video
+        const processedVideo = fs.readFileSync(outputPath);
+        console.log('Processed Video Buffer Size:', processedVideo.length);
+
+        // Cleanup temporary files
+        [videoPath, framePath, outputPath].forEach(file => {
+            if (fs.existsSync(file)) fs.unlinkSync(file);
+        });
+
+        return processedVideo;
+    } catch (error) {
+        console.error('Video processing error:', error);
+        throw error;
+    }
+}
+
+app.post("/generate-image", async (req, res) => {
+    try {
+        const { canvas, elements, mobile, caption } = req.body;
+        console.log(req.body);
+
+        // Validate input more thoroughly
+        if (!canvas || !elements || !Array.isArray(elements) || !mobile) {
+            return res.status(400).json({ error: "Invalid request data" });
+        }
+
+        // Format mobile number in a more robust way
+        const formattedMobile = mobile.includes("@c.us")
+            ? mobile
+            : `${mobile.replace(/[^0-9]/g, "")}@c.us`;
+
+        // Early exit if user not registered
+        const isRegistered = await client.isRegisteredUser(formattedMobile);
+        if (!isRegistered) {
+            return res.status(200).json({
+                status: "error",
+                message: "Not Registered To WhatsApp",
+            });
+        }
+
+        // Check if there's a video element
+        const findVideoIndex = elements.findIndex((ele) => ele.src && ele.src.endsWith(".mp4"));
+
+        if (findVideoIndex !== -1) {
+            try {
+                const videoElement = elements[findVideoIndex];
+                const canvasWidth = canvas.width || 800;
+                const canvasHeight = canvas.height || 600;
+                const canvasInstance = createCanvas(canvasWidth, canvasHeight);
+                const ctx = canvasInstance.getContext("2d");
+
+                // Make background transparent for video overlays
+                ctx.fillStyle = "rgba(0, 0, 0, 0)";
+                ctx.clearRect(0, 0, canvasWidth, canvasHeight);
+
+                // Sort by zIndex (default to 0)
+                const sortedElements = elements.sort(
+                    (a, b) => (a.zIndex || 0) - (b.zIndex || 0)
+                );
+
+                for (const element of sortedElements) {
+                    try {
+                        if (element === videoElement) continue;
+
+                        if (element.type === "image") {
+                            let imgBuffer;
+
+                            if (element.src.startsWith("http")) {
+                                imgBuffer = await loadImageFromUrl(element.src);
+                            } else if (element.src.startsWith("data:image")) {
+                                imgBuffer = Buffer.from(element.src.split(",")[1], "base64");
+                            } else {
+                                console.warn("Unsupported image source:", element.src);
+                                continue;
+                            }
+
+                            const imgInstance = await loadImage(imgBuffer);
+
+                            ctx.drawImage(
+                                imgInstance,
+                                Math.round(element.x),
+                                Math.round(element.y),
+                                Math.round(element.width),
+                                Math.round(element.height)
+                            );
+                        } else if (element.type === "text") {
+                            ctx.fillStyle = element.color || "#000000";
+                            ctx.textBaseline = "top";
+
+                            const fontSize = element.size || 24;
+                            ctx.font = getFontString(element);
+                            const lineHeight = fontSize * 1.2;
+
+                            const content = element.content || "";
+                            const lines = content.split("\n"); // support multi-line text
+
+                            const adjustedY = Math.round(element.y - (fontSize * 0.2));
+
+                            // Handle direction + letter spacing
+                            for (let li = 0; li < lines.length; li++) {
+                                const line = lines[li];
+
+                                // Measure the entire line for width (for text direction)
+                                const textMetrics = ctx.measureText(line);
+                                let xPos = element.x;
+
+                                // Adjust x position for right-aligned text
+                                if (element.textDirection === 'right') {
+                                    xPos -= textMetrics.width;
+                                }
+
+                                // Render the whole line at once to support complex scripts
+                                ctx.fillText(
+                                    line,
+                                    Math.round(xPos),
+                                    adjustedY + li * lineHeight
+                                );
+
+                                // Apply letter spacing for subsequent characters if needed
+                                if (element.letterSpacing && element.textDirection !== 'right') {
+                                    // For left-to-right text with letter spacing, we need to adjust manually
+                                    const letters = line.split("");
+                                    let currentX = xPos;
+                                    for (let i = 0; i < letters.length; i++) {
+                                        currentX += ctx.measureText(letters[i]).width + (element.letterSpacing || 0);
+                                    }
+                                }
+                            }
+                        }
+                    } catch (err) {
+                        console.error(`Error rendering ${element.type}:`, err.message);
+                    }
+                }
+
+                const buffer = canvasInstance.toBuffer("image/png");
+                const finalImage = await sharp(buffer, { density: 300 })
+                    .ensureAlpha()
+                    .png({ compressionLevel: 9, quality: 100 })
+                    .toBuffer();
+
+                const outputDir = path.join(__dirname, "media");
+                const fileName = `frame-${Date.now()}.png`;
+                const outputFile = path.join(outputDir, fileName);
+
+                if (!fs.existsSync(outputDir)) {
+                    fs.mkdirSync(outputDir, { recursive: true });
+                }
+
+                fs.writeFileSync(outputFile, finalImage);
+                console.log(`Frame image saved to ${outputFile}`);
+
+                const frameImageUrl = `http://localhost:8080/${fileName}`;
+                const processedVideo = await processVideoWithFrame(videoElement.src, frameImageUrl);
+
+                const media = new MessageMedia(
+                    'video/mp4',
+                    processedVideo.toString('base64'),
+                    'framed-video.mp4'
+                );
+
+                // Send only the video with caption
+                await client.sendMessage(formattedMobile, media, {
+                    caption: caption
+                });
+
+                // Clean up files
+                fs.unlinkSync(outputFile);
+
+                return res.status(200).json({
+                    status: "success",
+                    message: "Video sent successfully",
+                });
+            } catch (videoError) {
+                console.error("Error processing video:", videoError);
+                return res.status(500).json({
+                    status: "error",
+                    message: `Video processing failed: ${videoError.message}`,
+                });
+            }
+        }
+
+        // If no video found, proceed with image generation
+        const canvasWidth = canvas.width || 800;
+        const canvasHeight = canvas.height || 600;
+        const canvasInstance = createCanvas(canvasWidth, canvasHeight);
+        const ctx = canvasInstance.getContext("2d");
+
+        // Draw background
+        ctx.fillStyle = canvas.backgroundColor || "#ffffff";
+        ctx.fillRect(0, 0, canvasWidth, canvasHeight);
+
+        // Sort by zIndex (default to 0)
+        const sortedElements = elements.sort(
+            (a, b) => (a.zIndex || 0) - (b.zIndex || 0)
+        );
+
+        for (const element of sortedElements) {
+            try {
+                if (element.type === "image") {
+                    let imgBuffer;
+
+                    if (element.src.startsWith("http")) {
+                        imgBuffer = await loadImageFromUrl(element.src);
+                    } else if (element.src.startsWith("data:image")) {
+                        imgBuffer = Buffer.from(element.src.split(",")[1], "base64");
+                    } else {
+                        console.warn("Unsupported image source:", element.src);
+                        continue;
+                    }
+
+                    const imgInstance = await loadImage(imgBuffer);
+
+                    ctx.drawImage(
+                        imgInstance,
+                        Math.round(element.x),
+                        Math.round(element.y),
+                        Math.round(element.width),
+                        Math.round(element.height)
+                    );
+                } else if (element.type === "text") {
+                    ctx.fillStyle = element.color || "#000000";
+                    ctx.textBaseline = "top";
+
+                    const fontSize = element.size || 24;
+                    ctx.font = getFontString(element);
+                    const lineHeight = fontSize * 1.2;
+
+                    const content = element.content || "";
+                    const lines = content.split("\n"); // support multi-line text
+
+                    const adjustedY = Math.round(element.y);
+
+                    // Handle direction + letter spacing
+                    for (let li = 0; li < lines.length; li++) {
+                        const line = lines[li];
+
+                        // Measure the entire line for width (for text direction)
+                        const textMetrics = ctx.measureText(line);
+                        let xPos = element.x;
+
+                        // Adjust x position for right-aligned text
+                        if (element.textDirection === 'right') {
+                            xPos -= textMetrics.width;
+                        }
+
+                        // Render the whole line at once to support complex scripts
+                        ctx.fillText(
+                            line,
+                            Math.round(xPos),
+                            adjustedY + li * lineHeight
+                        );
+
+                        // Apply letter spacing for subsequent characters if needed
+                        if (element.letterSpacing && element.textDirection !== 'right') {
+                            // For left-to-right text with letter spacing, we need to adjust manually
+                            const letters = line.split("");
+                            let currentX = xPos;
+                            for (let i = 0; i < letters.length; i++) {
+                                currentX += ctx.measureText(letters[i]).width + (element.letterSpacing || 0);
+                            }
+                        }
+                    }
+                }
+            } catch (err) {
+                console.error(`Error rendering ${element.type}:`, err.message);
+            }
+        }
+
+        // Add watermark to the center of the image
+        /* try {
+          const watermarkUrl = "https://webtaxfileposter.taxfile.co.in/1721726534457_image_cropper_1721726524492.jpg";
+          const watermarkBuffer = await loadImageFromUrl(watermarkUrl);
+          const watermarkImage = await loadImage(watermarkBuffer);
+    
+          // Calculate center position
+          const watermarkWidth = canvasWidth * 0.5; // 50% of canvas width (adjust as needed)
+          const watermarkHeight = (watermarkImage.height * watermarkWidth) / watermarkImage.width;
+    
+          const x = (canvasWidth - watermarkWidth) / 2;
+          const y = (canvasHeight - watermarkHeight) / 2;
+    
+          // Draw watermark with reduced opacity
+          ctx.globalAlpha = 0.3; // 30% opacity (adjust as needed)
+          ctx.drawImage(
+            watermarkImage,
+            Math.round(x),
+            Math.round(y),
+            Math.round(watermarkWidth),
+            Math.round(watermarkHeight)
+          );
+          ctx.globalAlpha = 1.0; // Reset opacity
+        } catch (err) {
+          console.error("Error adding watermark:", err.message);
+        } */
+
+        const buffer = canvasInstance.toBuffer("image/png");
+
+        // Optional: Reprocess with sharp for consistent PNG quality
+        const finalImage = await sharp(buffer).png({ quality: 100 }).toBuffer();
+
+        // Save to media folder
+        const outputDir = path.join(__dirname, "media");
+        const fileName = `generated-${Date.now()}.png`;
+        const outputFile = path.join(outputDir, fileName);
+
+        if (!fs.existsSync(outputDir)) {
+            fs.mkdirSync(outputDir, { recursive: true });
+        }
+
+        fs.writeFileSync(outputFile, finalImage);
+        console.log(`Image saved to ${outputFile}`);
+
+        // Send the image via WhatsApp
+        const media = MessageMedia.fromFilePath(outputFile);
+        const sentMessage = await client.sendMessage(
+            formattedMobile,
+            media,
+            caption ? { caption } : {}
+        );
+
+        // Clean up the file after sending
+        try {
+            fs.unlinkSync(outputFile);
+        } catch (cleanupError) {
+            console.error("Error cleaning up file:", cleanupError.message);
+        }
+
+        return res.status(200).json({
+            status: "success",
+            message: "Media sent successfully",
+            data: sentMessage?.id, // Only send essential data
+        });
+    } catch (error) {
+        console.error("Error generating media:", error);
+        res.status(500).json({
+            status: "error",
+            error: "Failed to generate media",
+            details:
+                process.env.NODE_ENV === "development"
+                    ? error.message
+                    : undefined,
+        });
+    }
+});
+
+
+client.on("loading_screen", (percent, message) => {
+    console.log("LOADING SCREEN", percent, message);
+});
+
+// Pairing code only needs to be requested once
+let pairingCodeRequested = false;
+client.on("qr", async (qr) => {
     // NOTE: This event will not be fired if a session is specified.
-    console.log('QR RECEIVED', qr);
+    console.log("QR RECEIVED", qr);
+
+    // paiuting code example
+    const pairingCodeEnabled = false;
+    if (pairingCodeEnabled && !pairingCodeRequested) {
+        const pairingCode = await client.requestPairingCode("96170100100"); // enter the target phone number
+        console.log("Pairing code enabled, code: " + pairingCode);
+        pairingCodeRequested = true;
+    }
 });
 
-client.on('code', (code) => {
-    console.log('Pairing code:',code);
+client.on("authenticated", () => {
+    console.log("AUTHENTICATED");
 });
 
-client.on('authenticated', () => {
-    console.log('AUTHENTICATED');
-});
-
-client.on('auth_failure', msg => {
+client.on("auth_failure", (msg) => {
     // Fired if session restore was unsuccessful
-    console.error('AUTHENTICATION FAILURE', msg);
+    console.error("AUTHENTICATION FAILURE", msg);
 });
 
-client.on('ready', async () => {
-    console.log('READY');
+client.on("ready", async () => {
+    console.log("READY");
     const debugWWebVersion = await client.getWWebVersion();
     console.log(`WWebVersion = ${debugWWebVersion}`);
 
-    client.pupPage.on('pageerror', function(err) {
-        console.log('Page error: ' + err.toString());
+    client.pupPage.on("pageerror", function (err) {
+        console.log("Page error: " + err.toString());
     });
-    client.pupPage.on('error', function(err) {
-        console.log('Page error: ' + err.toString());
+    client.pupPage.on("error", function (err) {
+        console.log("Page error: " + err.toString());
     });
-    
 });
 
-client.on('message', async msg => {
-    console.log('MESSAGE RECEIVED', msg);
+client.on("disconnected", (reason) => {
+    console.log("Client was logged out", reason);
+});
 
-    if (msg.body === '!ping reply') {
-        // Send a new message as a reply to the current one
-        msg.reply('pong');
+// Function to check connection status
+async function checkWhatsAppConnection() {
+    try {
+        // Get the current state
+        const state = await client.getState();
 
-    } else if (msg.body === '!ping') {
-        // Send a new message to the same chat
-        client.sendMessage(msg.from, 'pong');
-
-    } else if (msg.body.startsWith('!sendto ')) {
-        // Direct send a new message to specific id
-        let number = msg.body.split(' ')[1];
-        let messageIndex = msg.body.indexOf(number) + number.length;
-        let message = msg.body.slice(messageIndex, msg.body.length);
-        number = number.includes('@c.us') ? number : `${number}@c.us`;
-        let chat = await msg.getChat();
-        chat.sendSeen();
-        client.sendMessage(number, message);
-
-    } else if (msg.body.startsWith('!subject ')) {
-        // Change the group subject
-        let chat = await msg.getChat();
-        if (chat.isGroup) {
-            let newSubject = msg.body.slice(9);
-            chat.setSubject(newSubject);
+        if (state === "CONNECTED") {
+            console.log("WhatsApp Web is connected");
+            pool = await getPool();
+            return true;
         } else {
-            msg.reply('This command can only be used in a group!');
+            console.log(
+                `WhatsApp Web is not connected. Current state: ${state}`
+            );
+            return false;
         }
-    } else if (msg.body.startsWith('!echo ')) {
-        // Replies with the same message
-        msg.reply(msg.body.slice(6));
-    } else if (msg.body.startsWith('!preview ')) {
-        const text = msg.body.slice(9);
-        msg.reply(text, null, { linkPreview: true });
-    } else if (msg.body.startsWith('!desc ')) {
-        // Change the group description
-        let chat = await msg.getChat();
-        if (chat.isGroup) {
-            let newDescription = msg.body.slice(6);
-            chat.setDescription(newDescription);
-        } else {
-            msg.reply('This command can only be used in a group!');
-        }
-    } else if (msg.body === '!leave') {
-        // Leave the group
-        let chat = await msg.getChat();
-        if (chat.isGroup) {
-            chat.leave();
-        } else {
-            msg.reply('This command can only be used in a group!');
-        }
-    } else if (msg.body.startsWith('!join ')) {
-        const inviteCode = msg.body.split(' ')[1];
-        try {
-            await client.acceptInvite(inviteCode);
-            msg.reply('Joined the group!');
-        } catch (e) {
-            msg.reply('That invite code seems to be invalid.');
-        }
-    } else if (msg.body.startsWith('!addmembers')) {
-        const group = await msg.getChat();
-        const result = await group.addParticipants(['number1@c.us', 'number2@c.us', 'number3@c.us']);
-        /**
-         * The example of the {@link result} output:
-         *
-         * {
-         *   'number1@c.us': {
-         *     code: 200,
-         *     message: 'The participant was added successfully',
-         *     isInviteV4Sent: false
-         *   },
-         *   'number2@c.us': {
-         *     code: 403,
-         *     message: 'The participant can be added by sending private invitation only',
-         *     isInviteV4Sent: true
-         *   },
-         *   'number3@c.us': {
-         *     code: 404,
-         *     message: 'The phone number is not registered on WhatsApp',
-         *     isInviteV4Sent: false
-         *   }
-         * }
-         *
-         * For more usage examples:
-         * @see https://github.com/pedroslopez/whatsapp-web.js/pull/2344#usage-example1
-         */
-        console.log(result);
-    } else if (msg.body === '!creategroup') {
-        const partitipantsToAdd = ['number1@c.us', 'number2@c.us', 'number3@c.us'];
-        const result = await client.createGroup('Group Title', partitipantsToAdd);
-        /**
-         * The example of the {@link result} output:
-         * {
-         *   title: 'Group Title',
-         *   gid: {
-         *     server: 'g.us',
-         *     user: '1111111111',
-         *     _serialized: '1111111111@g.us'
-         *   },
-         *   participants: {
-         *     'botNumber@c.us': {
-         *       statusCode: 200,
-         *       message: 'The participant was added successfully',
-         *       isGroupCreator: true,
-         *       isInviteV4Sent: false
-         *     },
-         *     'number1@c.us': {
-         *       statusCode: 200,
-         *       message: 'The participant was added successfully',
-         *       isGroupCreator: false,
-         *       isInviteV4Sent: false
-         *     },
-         *     'number2@c.us': {
-         *       statusCode: 403,
-         *       message: 'The participant can be added by sending private invitation only',
-         *       isGroupCreator: false,
-         *       isInviteV4Sent: true
-         *     },
-         *     'number3@c.us': {
-         *       statusCode: 404,
-         *       message: 'The phone number is not registered on WhatsApp',
-         *       isGroupCreator: false,
-         *       isInviteV4Sent: false
-         *     }
-         *   }
-         * }
-         *
-         * For more usage examples:
-         * @see https://github.com/pedroslopez/whatsapp-web.js/pull/2344#usage-example2
-         */
-        console.log(result);
-    } else if (msg.body === '!groupinfo') {
-        let chat = await msg.getChat();
-        if (chat.isGroup) {
-            msg.reply(`
-                *Group Details*
-                Name: ${chat.name}
-                Description: ${chat.description}
-                Created At: ${chat.createdAt.toString()}
-                Created By: ${chat.owner.user}
-                Participant count: ${chat.participants.length}
-            `);
-        } else {
-            msg.reply('This command can only be used in a group!');
-        }
-    } else if (msg.body === '!chats') {
-        const chats = await client.getChats();
-        client.sendMessage(msg.from, `The bot has ${chats.length} chats open.`);
-    } else if (msg.body === '!info') {
-        let info = client.info;
-        client.sendMessage(msg.from, `
-            *Connection info*
-            User name: ${info.pushname}
-            My number: ${info.wid.user}
-            Platform: ${info.platform}
-        `);
-    } else if (msg.body === '!mediainfo' && msg.hasMedia) {
-        const attachmentData = await msg.downloadMedia();
-        msg.reply(`
-            *Media info*
-            MimeType: ${attachmentData.mimetype}
-            Filename: ${attachmentData.filename}
-            Data (length): ${attachmentData.data.length}
-        `);
-    } else if (msg.body === '!quoteinfo' && msg.hasQuotedMsg) {
-        const quotedMsg = await msg.getQuotedMessage();
+    } catch (error) {
+        console.error("Error checking connection status:", error);
+        return false;
+    }
+}
 
-        quotedMsg.reply(`
-            ID: ${quotedMsg.id._serialized}
-            Type: ${quotedMsg.type}
-            Author: ${quotedMsg.author || quotedMsg.from}
-            Timestamp: ${quotedMsg.timestamp}
-            Has Media? ${quotedMsg.hasMedia}
-        `);
-    } else if (msg.body === '!resendmedia' && msg.hasQuotedMsg) {
-        const quotedMsg = await msg.getQuotedMessage();
-        if (quotedMsg.hasMedia) {
-            const attachmentData = await quotedMsg.downloadMedia();
-            client.sendMessage(msg.from, attachmentData, { caption: 'Here\'s your requested media.' });
+// Use a flag to prevent concurrent executions
+let isProcessing = false;
+
+setInterval(async () => {
+    if (isProcessing) {
+        console.log("Previous cycle still processing, skipping...");
+        return;
+    }
+
+    isProcessing = true;
+    try {
+        const isConnected = await checkWhatsAppConnection();
+        console.log("Connection status:", isConnected, new Date().toLocaleString());
+        if (isConnected) {
+            await sentWhatsAppMessage();
         }
-        if (quotedMsg.hasMedia && quotedMsg.type === 'audio') {
-            const audio = await quotedMsg.downloadMedia();
-            await client.sendMessage(msg.from, audio, { sendAudioAsVoice: true });
+    } catch (error) {
+        console.error("Error in interval:", error);
+    } finally {
+        isProcessing = false;
+    }
+}, 30000); // Check every 30 seconds
+
+const sentWhatsAppMessage = async () => {
+    try {
+        // Fetch messages with status = 1 and sent_count = 0 to avoid reprocessing
+        const listOfMessagesQuery = `
+            SELECT wm.id as wm_id, wm.* 
+            FROM WhatsUpMessage wm 
+            WHERE wm.status = 1 AND wm.deleted = 0
+        `;
+        const listOfMessages = await pool.query(listOfMessagesQuery);
+
+        if (listOfMessages.recordset.length === 0) {
+            console.log("No new messages to send.");
+            return;
         }
-    } else if (msg.body === '!isviewonce' && msg.hasQuotedMsg) {
-        const quotedMsg = await msg.getQuotedMessage();
-        if (quotedMsg.hasMedia) {
-            const media = await quotedMsg.downloadMedia();
-            await client.sendMessage(msg.from, media, { isViewOnce: true });
-        }
-    } else if (msg.body === '!location') {
-        // only latitude and longitude
-        await msg.reply(new Location(37.422, -122.084));
-        // location with name only
-        await msg.reply(new Location(37.422, -122.084, { name: 'Googleplex' }));
-        // location with address only
-        await msg.reply(new Location(37.422, -122.084, { address: '1600 Amphitheatre Pkwy, Mountain View, CA 94043, USA' }));
-        // location with name, address and url
-        await msg.reply(new Location(37.422, -122.084, { name: 'Googleplex', address: '1600 Amphitheatre Pkwy, Mountain View, CA 94043, USA', url: 'https://google.com' }));
-    } else if (msg.location) {
-        msg.reply(msg.location);
-    } else if (msg.body.startsWith('!status ')) {
-        const newStatus = msg.body.split(' ')[1];
-        await client.setStatus(newStatus);
-        msg.reply(`Status was updated to *${newStatus}*`);
-    } else if (msg.body === '!mentionUsers') {
-        const chat = await msg.getChat();
-        const userNumber = 'XXXXXXXXXX';
-        /**
-         * To mention one user you can pass user's ID to 'mentions' property as is,
-         * without wrapping it in Array, and a user's phone number to the message body:
-         */
-        await chat.sendMessage(`Hi @${userNumber}`, {
-            mentions: userNumber + '@c.us'
-        });
-        // To mention a list of users:
-        await chat.sendMessage(`Hi @${userNumber}, @${userNumber}`, {
-            mentions: [userNumber + '@c.us', userNumber + '@c.us']
-        });
-    } else if (msg.body === '!mentionGroups') {
-        const chat = await msg.getChat();
-        const groupId = 'YYYYYYYYYY@g.us';
-        /**
-         * Sends clickable group mentions, the same as user mentions.
-         * When the mentions are clicked, it opens a chat with the mentioned group.
-         * The 'groupMentions.subject' can be custom
-         * 
-         * @note The user that does not participate in the mentioned group,
-         * will not be able to click on that mentioned group, the same if the group does not exist
-         *
-         * To mention one group:
-         */
-        await chat.sendMessage(`Check the last message here: @${groupId}`, {
-            groupMentions: { subject: 'GroupSubject', id: groupId }
-        });
-        // To mention a list of groups:
-        await chat.sendMessage(`Check the last message in these groups: @${groupId}, @${groupId}`, {
-            groupMentions: [
-                { subject: 'FirstGroup', id: groupId },
-                { subject: 'SecondGroup', id: groupId }
-            ]
-        });
-    } else if (msg.body === '!getGroupMentions') {
-        // To get group mentions from a message:
-        const groupId = 'ZZZZZZZZZZ@g.us';
-        const msg = await client.sendMessage('chatId', `Check the last message here: @${groupId}`, {
-            groupMentions: { subject: 'GroupSubject', id: groupId }
-        });
-        /** {@link groupMentions} is an array of `GroupChat` */
-        const groupMentions = await msg.getGroupMentions();
-        console.log(groupMentions);
-    } else if (msg.body === '!delete') {
-        if (msg.hasQuotedMsg) {
-            const quotedMsg = await msg.getQuotedMessage();
-            if (quotedMsg.fromMe) {
-                quotedMsg.delete(true);
-            } else {
-                msg.reply('I can only delete my own messages');
+
+        for (let i = 0; i < listOfMessages.recordset.length; i++) {
+            const message = listOfMessages.recordset[i];
+
+            // Immediately mark the message as being processed to prevent duplicate sends
+            const markProcessingQuery = `
+                UPDATE WhatsUpMessage 
+                SET status = 2, updated_at = GETDATE(), remark = 'Processing'
+                WHERE id = ${message.wm_id} AND status = 1
+            `;
+            const updateResult = await pool.query(markProcessingQuery);
+
+            // If the update affected no rows, the message was already processed by another instance
+            if (updateResult.rowsAffected[0] === 0) {
+                console.log(`Message ${message.wm_id} already being processed or sent, skipping...`);
+                continue;
+            }
+
+            try {
+                // const fetchUserQuery = `
+                //     SELECT * FROM users WHERE id = ${message.user_id}
+                // `;
+                // console.log('fetchUserQuery', fetchUserQuery);
+                // const fetchUser = await pool.query(fetchUserQuery);
+
+                // const filterUserData = fetchUser.recordset.map((obj) => {
+                //     const filtered = {};
+                //     for (const [key, value] of Object.entries(obj)) {
+                //         if (
+                //             typeof value === "string" &&
+                //             value.length > 0 &&
+                //             !["register_mobile", "password", "role"].includes(key)
+                //         ) {
+                //             filtered[key] = value;
+                //         }
+                //     }
+                //     return filtered;
+                // });
+
+                const fetchFrameQuery = `
+                     SELECT TOP 1 usf.frame_id as frame_id, usf.frame_json, fc.name as frame_category_name, fsc.name as frame_sub_category_name 
+                    FROM user_selection_frame usf
+                    LEFT JOIN frame ff ON ff.id = usf.frame_id
+                    LEFT JOIN frame_categories fc ON fc.id = ff.frame_categories_id
+                    LEFT JOIN frame_sub_categories fsc ON fsc.id = ff.frame_sub_categories_id 
+                    WHERE usf.user_id = ${message.user_id} AND usf.status = 1 AND usf.deleted = 0
+                    ORDER BY NEWID()
+                `;
+                // const fetchFrameQuery = `
+                //     SELECT fm.id as frame_id, fm.frame_json, fc.name as frame_category_name, 
+                //            fsc.name as frame_sub_category_name 
+                //     FROM frame fm
+                //     LEFT JOIN frame_categories fc ON fc.id = fm.frame_categories_id
+                //     LEFT JOIN frame_sub_categories fsc ON fsc.id = fm.frame_sub_categories_id
+                //     WHERE fm.id = ${message.frame_id}
+                // `;
+                console.log('fetchFrameQuery', fetchFrameQuery);
+                const fetchFrame = await pool.query(fetchFrameQuery);
+
+                if (fetchFrame.recordset.length === 0) {
+                    console.log(`No frame found for user ${message.user_id}`);
+                    const updateStatusQuery = `
+                        UPDATE WhatsUpMessage 
+                        SET status = 0, failed = failed + 1, sent_count = sent_count + 1, 
+                            updated_at = GETDATE(), remark = 'No frame found for user'
+                        WHERE id = ${message.wm_id}
+                    `;
+                    await pool.query(updateStatusQuery);
+                    continue;
+                }
+
+                await sentImagesOnWhatsApp(message, {
+                    ...fetchFrame.recordset[0],
+                });
+            } catch (error) {
+                console.error(`Error processing message ${message.wm_id}:`, error);
+                const updateStatusQuery = `
+                    UPDATE WhatsUpMessage 
+                    SET status = 0, failed = failed + 1, sent_count = sent_count + 1, 
+                        updated_at = GETDATE(), remark = 'Error: ${error.message.replace(/'/g, "''")}'
+                    WHERE id = ${message.wm_id}
+                `;
+                await pool.query(updateStatusQuery);
             }
         }
-    } else if (msg.body === '!pin') {
-        const chat = await msg.getChat();
-        await chat.pin();
-    } else if (msg.body === '!archive') {
-        const chat = await msg.getChat();
-        await chat.archive();
-    } else if (msg.body === '!mute') {
-        const chat = await msg.getChat();
-        // mute the chat for 20 seconds
-        const unmuteDate = new Date();
-        unmuteDate.setSeconds(unmuteDate.getSeconds() + 20);
-        await chat.mute(unmuteDate);
-    } else if (msg.body === '!typing') {
-        const chat = await msg.getChat();
-        // simulates typing in the chat
-        chat.sendStateTyping();
-    } else if (msg.body === '!recording') {
-        const chat = await msg.getChat();
-        // simulates recording audio in the chat
-        chat.sendStateRecording();
-    } else if (msg.body === '!clearstate') {
-        const chat = await msg.getChat();
-        // stops typing or recording in the chat
-        chat.clearState();
-    } else if (msg.body === '!jumpto') {
-        if (msg.hasQuotedMsg) {
-            const quotedMsg = await msg.getQuotedMessage();
-            client.interface.openChatWindowAt(quotedMsg.id._serialized);
-        }
-    } else if (msg.body === '!buttons') {
-        let button = new Buttons('Button body', [{ body: 'bt1' }, { body: 'bt2' }, { body: 'bt3' }], 'title', 'footer');
-        client.sendMessage(msg.from, button);
-    } else if (msg.body === '!list') {
-        let sections = [
-            { title: 'sectionTitle', rows: [{ title: 'ListItem1', description: 'desc' }, { title: 'ListItem2' }] }
-        ];
-        let list = new List('List body', 'btnText', sections, 'Title', 'footer');
-        client.sendMessage(msg.from, list);
-    } else if (msg.body === '!reaction') {
-        msg.react('👍');
-    } else if (msg.body === '!sendpoll') {
-        /** By default the poll is created as a single choice poll: */
-        await msg.reply(new Poll('Winter or Summer?', ['Winter', 'Summer']));
-        /** If you want to provide a multiple choice poll, add allowMultipleAnswers as true: */
-        await msg.reply(new Poll('Cats or Dogs?', ['Cats', 'Dogs'], { allowMultipleAnswers: true }));
-        /**
-         * You can provide a custom message secret, it can be used as a poll ID:
-         * @note It has to be a unique vector with a length of 32
-         */
-        await msg.reply(
-            new Poll('Cats or Dogs?', ['Cats', 'Dogs'], {
-                messageSecret: [
-                    1, 2, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
-                ]
-            })
+    } catch (error) {
+        console.error("Error in sentWhatsAppMessage:", error);
+    }
+};
+
+const sentImagesOnWhatsApp = async (listOfMessages, userData) => {
+    console.log("userData", userData);
+    console.log("listOfMessages", listOfMessages);
+    try {
+        const filterUsersFrameKeys = Object.keys(userData).filter(
+            (key) =>
+                ![
+                    "frame_id",
+                    "frame_json",
+                    "frame_category_name",
+                    "frame_sub_category_name",
+                ].includes(key)
         );
-    } else if (msg.body === '!edit') {
-        if (msg.hasQuotedMsg) {
-            const quotedMsg = await msg.getQuotedMessage();
-            if (quotedMsg.fromMe) {
-                quotedMsg.edit(msg.body.replace('!edit', ''));
-            } else {
-                msg.reply('I can only edit my own messages');
+        filterUsersFrameKeys.push("MainImage", "Frame");
+
+        let jsonData;
+        try {
+            jsonData = JSON.parse(userData.frame_json);
+        } catch (parseError) {
+            console.error("Error parsing frame_json:", parseError);
+            throw new Error("Invalid frame configuration");
+        }
+
+        // jsonData.elements = jsonData.elements.filter((element) =>
+        //     filterUsersFrameKeys.includes(element.field)
+        // );
+
+        const newJsonDataElements = jsonData.elements.map((item) => {
+            // if (item.type === "text") {
+            //     return {
+            //         ...item,
+            //         content: userData[item.field],
+            //     };
+            // }
+
+            if (item.field === "MainImage") {
+                return {
+                    ...item,
+                    src: listOfMessages["image"],
+                };
+            }
+
+            // if (item.field === "business_logo" && userData["logo_json"]) {
+            //     try {
+            //         const parseNewLogoJson = JSON.parse(userData["logo_json"]);
+            //         return {
+            //             ...item,
+            //             ...parseNewLogoJson,
+            //             src: `http://localhost:5000/uploads/users/business_logo/${userData["business_logo"]}`,
+            //         };
+            //     } catch (e) {
+            //         console.error("Error processing logo:", e);
+            //         return item;
+            //     }
+            // }
+
+            return item;
+        });
+        jsonData.elements = newJsonDataElements;
+
+        const json = {
+            ...jsonData,
+            mobile: `${listOfMessages.WhatsUpSentNumber}`,
+            caption: `*${listOfMessages.MediaTitle}*\n\n${moment(listOfMessages.MediaDate).format('LL')}`,
+        };
+
+        const { canvas, elements, mobile, caption } = json;
+
+        if (!canvas || !elements || !Array.isArray(elements) || !mobile) {
+            throw new Error("Invalid request data");
+        }
+
+        const formattedMobile = mobile.includes("@c.us")
+            ? mobile
+            : `${mobile.replace(/[^0-9]/g, "")}@c.us`;
+
+        const isRegistered = await client.isRegisteredUser(formattedMobile);
+        if (!isRegistered) {
+            const updateStatusQuery = `
+                UPDATE WhatsUpMessage 
+                SET status = 0, failed = failed + 1, sent_count = sent_count + 1, 
+                    updated_at = GETDATE(), remark = 'Not Registered To WhatsApp'
+                WHERE id = ${listOfMessages.wm_id}
+            `;
+            await pool.query(updateStatusQuery);
+            return;
+        }
+
+        // Check if there's a video element
+        const findVideoIndex = elements.findIndex((ele) => ele.src && ele.src.endsWith(".mp4"));
+
+        if (findVideoIndex !== -1) {
+            try {
+                const videoElement = elements[findVideoIndex];
+                const canvasWidth = canvas.width || 800;
+                const canvasHeight = canvas.height || 600;
+                const canvasInstance = createCanvas(canvasWidth, canvasHeight);
+                const ctx = canvasInstance.getContext("2d");
+
+                // Make background transparent for video overlays
+                ctx.fillStyle = "rgba(0, 0, 0, 0)";
+                ctx.clearRect(0, 0, canvasWidth, canvasHeight);
+
+                // Sort by zIndex (default to 0)
+                const sortedElements = elements.sort(
+                    (a, b) => (a.zIndex || 0) - (b.zIndex || 0)
+                );
+
+                for (const element of sortedElements) {
+                    try {
+                        if (element === videoElement) continue;
+
+                        if (element.type === "image") {
+                            let imgBuffer;
+
+                            if (element.src.startsWith("http")) {
+                                imgBuffer = await loadImageFromUrl(element.src);
+                            } else if (element.src.startsWith("data:image")) {
+                                imgBuffer = Buffer.from(element.src.split(",")[1], "base64");
+                            } else {
+                                console.warn("Unsupported image source:", element.src);
+                                continue;
+                            }
+
+                            const imgInstance = await loadImage(imgBuffer);
+
+                            ctx.drawImage(
+                                imgInstance,
+                                Math.round(element.x),
+                                Math.round(element.y),
+                                Math.round(element.width),
+                                Math.round(element.height)
+                            );
+                        } else if (element.type === "text") {
+                            ctx.fillStyle = element.color || "#000000";
+                            ctx.textBaseline = "top";
+
+                            const fontSize = element.size || 24;
+                            ctx.font = getFontString(element);
+                            const lineHeight = fontSize * 1.2;
+
+                            const content = element.content || "";
+                            const lines = content.split("\n"); // support multi-line text
+
+                            const adjustedY = Math.round(element.y - (fontSize * 0.2));
+
+                            // Handle direction + letter spacing
+                            for (let li = 0; li < lines.length; li++) {
+                                const line = lines[li];
+
+                                // Measure the entire line for width (for text direction)
+                                const textMetrics = ctx.measureText(line);
+                                let xPos = element.x;
+
+                                // Adjust x position for right-aligned text
+                                if (element.textDirection === 'right') {
+                                    xPos -= textMetrics.width;
+                                }
+
+                                // Render the whole line at once to support complex scripts
+                                ctx.fillText(
+                                    line,
+                                    Math.round(xPos),
+                                    adjustedY + li * lineHeight
+                                );
+
+                                // Apply letter spacing for subsequent characters if needed
+                                if (element.letterSpacing && element.textDirection !== 'right') {
+                                    // For left-to-right text with letter spacing, we need to adjust manually
+                                    const letters = line.split("");
+                                    let currentX = xPos;
+                                    for (let i = 0; i < letters.length; i++) {
+                                        currentX += ctx.measureText(letters[i]).width + (element.letterSpacing || 0);
+                                    }
+                                }
+                            }
+                        }
+                    } catch (err) {
+                        console.error(`Error rendering ${element.type}:`, err.message);
+                    }
+                }
+
+                const buffer = canvasInstance.toBuffer("image/png");
+                const finalImage = await sharp(buffer, { density: 300 })
+                    .ensureAlpha()
+                    .png({ compressionLevel: 9, quality: 100 })
+                    .toBuffer();
+
+                const outputDir = path.join(__dirname, "media");
+                const fileName = `frame-${Date.now()}.png`;
+                const outputFile = path.join(outputDir, fileName);
+
+                if (!fs.existsSync(outputDir)) {
+                    fs.mkdirSync(outputDir, { recursive: true });
+                }
+
+                fs.writeFileSync(outputFile, finalImage);
+                console.log(`Frame image saved to ${outputFile}`);
+
+                const frameImageUrl = `http://localhost:8080/${fileName}`;
+                const processedVideo = await processVideoWithFrame(videoElement.src, frameImageUrl);
+
+                const media = new MessageMedia(
+                    'video/mp4',
+                    processedVideo.toString('base64'),
+                    'framed-video.mp4'
+                );
+
+                // Send only the video with caption
+                await client.sendMessage(formattedMobile, media, {
+                    caption: caption
+                });
+
+                // Clean up files
+                fs.unlinkSync(outputFile);
+
+                const updateStatusQuery = `
+                    UPDATE WhatsUpMessage 
+                    SET status = 0, sent_count = sent_count + 1, 
+                        updated_at = GETDATE(), remark = 'Video Sent Successfully!'
+                    WHERE id = ${listOfMessages.wm_id}
+                `;
+                await pool.query(updateStatusQuery);
+
+                return;
+
+                // return res.status(200).json({
+                //     status: "success",
+                //     message: "Video sent successfully",
+                // });
+            } catch (videoError) {
+                console.error("Error processing video:", videoError);
+                return res.status(500).json({
+                    status: "error",
+                    message: `Video processing failed: ${videoError.message}`,
+                });
             }
         }
-    } else if (msg.body === '!updatelabels') {
-        const chat = await msg.getChat();
-        await chat.changeLabels([0, 1]);
-    } else if (msg.body === '!addlabels') {
-        const chat = await msg.getChat();
-        let labels = (await chat.getLabels()).map((l) => l.id);
-        labels.push('0');
-        labels.push('1');
-        await chat.changeLabels(labels);
-    } else if (msg.body === '!removelabels') {
-        const chat = await msg.getChat();
-        await chat.changeLabels([]);
-    } else if (msg.body === '!approverequest') {
-        /**
-         * Presented an example for membership request approvals, the same examples are for the request rejections.
-         * To approve the membership request from a specific user:
-         */
-        await client.approveGroupMembershipRequests(msg.from, { requesterIds: 'number@c.us' });
-        /** The same for execution on group object (no need to provide the group ID): */
-        const group = await msg.getChat();
-        await group.approveGroupMembershipRequests({ requesterIds: 'number@c.us' });
-        /** To approve several membership requests: */
-        const approval = await client.approveGroupMembershipRequests(msg.from, {
-            requesterIds: ['number1@c.us', 'number2@c.us']
-        });
-        /**
-         * The example of the {@link approval} output:
-         * [
-         *   {
-         *     requesterId: 'number1@c.us',
-         *     message: 'Rejected successfully'
-         *   },
-         *   {
-         *     requesterId: 'number2@c.us',
-         *     error: 404,
-         *     message: 'ParticipantRequestNotFoundError'
-         *   }
-         * ]
-         *
-         */
-        console.log(approval);
-        /** To approve all the existing membership requests (simply don't provide any user IDs): */
-        await client.approveGroupMembershipRequests(msg.from);
-        /** To change the sleep value to 300 ms: */
-        await client.approveGroupMembershipRequests(msg.from, {
-            requesterIds: ['number1@c.us', 'number2@c.us'],
-            sleep: 300
-        });
-        /** To change the sleep value to random value between 100 and 300 ms: */
-        await client.approveGroupMembershipRequests(msg.from, {
-            requesterIds: ['number1@c.us', 'number2@c.us'],
-            sleep: [100, 300]
-        });
-        /** To explicitly disable the sleep: */
-        await client.approveGroupMembershipRequests(msg.from, {
-            requesterIds: ['number1@c.us', 'number2@c.us'],
-            sleep: null
-        });
-    } else if (msg.body === '!pinmsg') {
-        /**
-         * Pins a message in a chat, a method takes a number in seconds for the message to be pinned.
-         * WhatsApp default values for duration to pass to the method are:
-         * 1. 86400 for 24 hours
-         * 2. 604800 for 7 days
-         * 3. 2592000 for 30 days
-         * You can pass your own value:
-         */
-        const result = await msg.pin(60); // Will pin a message for 1 minute
-        console.log(result); // True if the operation completed successfully, false otherwise
-    } else if (msg.body === '!howManyConnections') {
-        /**
-         * Get user device count by ID
-         * Each WaWeb Connection counts as one device, and the phone (if exists) counts as one
-         * So for a non-enterprise user with one WaWeb connection it should return "2"
-         */
-        let deviceCount = await client.getContactDeviceCount(msg.from);
-        await msg.reply(`You have *${deviceCount}* devices connected`);
-    } else if (msg.body === '!syncHistory') {
-        const isSynced = await client.syncHistory(msg.from);
-        // Or through the Chat object:
-        // const chat = await client.getChatById(msg.from);
-        // const isSynced = await chat.syncHistory();
-        
-        await msg.reply(isSynced ? 'Historical chat is syncing..' : 'There is no historical chat to sync.');
-    } else if (msg.body === '!statuses') {
-        const statuses = await client.getBroadcasts();
-        console.log(statuses);
-        const chat = await statuses[0]?.getChat(); // Get user chat of a first status
-        console.log(chat);
-    } else if (msg.body === '!sendMediaHD' && msg.hasQuotedMsg) {
-        const quotedMsg = await msg.getQuotedMessage();
-        if (quotedMsg.hasMedia) {
-            const media = await quotedMsg.downloadMedia();
-            await client.sendMessage(msg.from, media, { sendMediaAsHd: true });
+
+        // If no video found, proceed with image generation
+        const canvasWidth = canvas.width || 800;
+        const canvasHeight = canvas.height || 600;
+        const canvasInstance = createCanvas(canvasWidth, canvasHeight);
+        const ctx = canvasInstance.getContext("2d");
+
+        // Draw background
+        ctx.fillStyle = canvas.backgroundColor || "#ffffff";
+        ctx.fillRect(0, 0, canvasWidth, canvasHeight);
+
+        // Sort by zIndex (default to 0)
+        const sortedElements = elements.sort(
+            (a, b) => (a.zIndex || 0) - (b.zIndex || 0)
+        );
+
+        for (const element of sortedElements) {
+            try {
+                if (element.type === "image") {
+                    let imgBuffer;
+
+                    if (element.src.startsWith("http")) {
+                        imgBuffer = await loadImageFromUrl(element.src);
+                    } else if (element.src.startsWith("data:image")) {
+                        imgBuffer = Buffer.from(element.src.split(",")[1], "base64");
+                    } else {
+                        console.warn("Unsupported image source:", element.src);
+                        continue;
+                    }
+
+                    const imgInstance = await loadImage(imgBuffer);
+
+                    ctx.drawImage(
+                        imgInstance,
+                        Math.round(element.x),
+                        Math.round(element.y),
+                        Math.round(element.width),
+                        Math.round(element.height)
+                    );
+                } else if (element.type === "text") {
+                    ctx.fillStyle = element.color || "#000000";
+                    ctx.textBaseline = "top";
+
+                    const fontSize = element.size || 24;
+                    ctx.font = getFontString(element);
+                    const lineHeight = fontSize * 1.2;
+
+                    const content = element.content || "";
+                    const lines = content.split("\n"); // support multi-line text
+
+                    const adjustedY = Math.round(element.y);
+
+                    // Handle direction + letter spacing
+                    for (let li = 0; li < lines.length; li++) {
+                        const line = lines[li];
+
+                        // Measure the entire line for width (for text direction)
+                        const textMetrics = ctx.measureText(line);
+                        let xPos = element.x;
+
+                        // Adjust x position for right-aligned text
+                        if (element.textDirection === 'right') {
+                            xPos -= textMetrics.width;
+                        }
+
+                        // Render the whole line at once to support complex scripts
+                        ctx.fillText(
+                            line,
+                            Math.round(xPos),
+                            adjustedY + li * lineHeight
+                        );
+
+                        // Apply letter spacing for subsequent characters if needed
+                        if (element.letterSpacing && element.textDirection !== 'right') {
+                            // For left-to-right text with letter spacing, we need to adjust manually
+                            const letters = line.split("");
+                            let currentX = xPos;
+                            for (let i = 0; i < letters.length; i++) {
+                                currentX += ctx.measureText(letters[i]).width + (element.letterSpacing || 0);
+                            }
+                        }
+                    }
+                }
+            } catch (err) {
+                console.error(`Error rendering ${element.type}:`, err.message);
+            }
         }
-    } else if (msg.body === '!parseVCard') {
-        const vCard =
-            'BEGIN:VCARD\n' +
-            'VERSION:3.0\n' +
-            'FN:John Doe\n' +
-            'ORG:Microsoft;\n' +
-            'EMAIL;type=INTERNET:john.doe@gmail.com\n' +
-            'URL:www.johndoe.com\n' +
-            'TEL;type=CELL;type=VOICE;waid=18006427676:+1 (800) 642 7676\n' +
-            'END:VCARD';
-        const vCardExtended =
-            'BEGIN:VCARD\n' +
-            'VERSION:3.0\n' +
-            'FN:John Doe\n' +
-            'ORG:Microsoft;\n' +
-            'item1.TEL:+1 (800) 642 7676\n' +
-            'item1.X-ABLabel:USA Customer Service\n' +
-            'item2.TEL:+55 11 4706 0900\n' +
-            'item2.X-ABLabel:Brazil Customer Service\n' +
-            'PHOTO;BASE64:here you can paste a binary data of a contact photo in Base64 encoding\n' +
-            'END:VCARD';
-        const userId = 'XXXXXXXXXX@c.us';
-        await client.sendMessage(userId, vCard);
-        await client.sendMessage(userId, vCardExtended);
-    } else if (msg.body === '!changeSync') {
-        // NOTE: this action will take effect after you restart the client.
-        const backgroundSync = await client.setBackgroundSync(true);
-        console.log(backgroundSync);
-    }
-});
 
-client.on('message_create', async (msg) => {
-    // Fired on all message creations, including your own
-    if (msg.fromMe) {
-        // do stuff here
-    }
-
-    // Unpins a message
-    if (msg.fromMe && msg.body.startsWith('!unpin')) {
-        const pinnedMsg = await msg.getQuotedMessage();
-        if (pinnedMsg) {
-            // Will unpin a message
-            const result = await pinnedMsg.unpin();
-            console.log(result); // True if the operation completed successfully, false otherwise
-        }
-    }
-});
-
-client.on('message_ciphertext', (msg) => {
-    // Receiving new incoming messages that have been encrypted
-    // msg.type === 'ciphertext'
-    msg.body = 'Waiting for this message. Check your phone.';
+        // Add watermark to the center of the image
+        /* try {
+          const watermarkUrl = "https://webtaxfileposter.taxfile.co.in/1721726534457_image_cropper_1721726524492.jpg";
+          const watermarkBuffer = await loadImageFromUrl(watermarkUrl);
+          const watermarkImage = await loadImage(watermarkBuffer);
     
-    // do stuff here
-});
+          // Calculate center position
+          const watermarkWidth = canvasWidth * 0.5; // 50% of canvas width (adjust as needed)
+          const watermarkHeight = (watermarkImage.height * watermarkWidth) / watermarkImage.width;
+    
+          const x = (canvasWidth - watermarkWidth) / 2;
+          const y = (canvasHeight - watermarkHeight) / 2;
+    
+          // Draw watermark with reduced opacity
+          ctx.globalAlpha = 0.3; // 30% opacity (adjust as needed)
+          ctx.drawImage(
+            watermarkImage,
+            Math.round(x),
+            Math.round(y),
+            Math.round(watermarkWidth),
+            Math.round(watermarkHeight)
+          );
+          ctx.globalAlpha = 1.0; // Reset opacity
+        } catch (err) {
+          console.error("Error adding watermark:", err.message);
+        } */
 
-client.on('message_revoke_everyone', async (after, before) => {
-    // Fired whenever a message is deleted by anyone (including you)
-    console.log(after); // message after it was deleted.
-    if (before) {
-        console.log(before); // message before it was deleted.
+        const buffer = canvasInstance.toBuffer("image/png");
+
+        // Optional: Reprocess with sharp for consistent PNG quality
+        const finalImage = await sharp(buffer).png({ quality: 100 }).toBuffer();
+
+        // Save to media folder
+        const outputDir = path.join(__dirname, "media");
+        const fileName = `generated-${Date.now()}.png`;
+        const outputFile = path.join(outputDir, fileName);
+
+        if (!fs.existsSync(outputDir)) {
+            fs.mkdirSync(outputDir, { recursive: true });
+        }
+
+        fs.writeFileSync(outputFile, finalImage);
+        console.log(`Image saved to ${outputFile}`);
+
+        // Send the image via WhatsApp
+        const media = MessageMedia.fromFilePath(outputFile);
+        const sentMessage = await client.sendMessage(
+            formattedMobile,
+            media,
+            caption ? { caption } : {}
+        );
+
+        // Clean up the file after sending
+        try {
+            fs.unlinkSync(outputFile);
+        } catch (cleanupError) {
+            console.error("Error cleaning up file:", cleanupError.message);
+        }
+
+        const updateStatusQuery = `
+            UPDATE WhatsUpMessage 
+            SET status = 0, sent_count = sent_count + 1, 
+                updated_at = GETDATE(), remark = 'Sent Successfully!'
+            WHERE id = ${listOfMessages.wm_id}
+        `;
+        await pool.query(updateStatusQuery);
+    } catch (error) {
+        console.error("Error generating media:", error);
+        const updateStatusQuery = `
+            UPDATE WhatsUpMessage 
+            SET status = 0, sent_count = sent_count + 1, failed = failed + 1, 
+                updated_at = GETDATE(), remark = 'Error: ${error?.message?.replace(/'/g, "''") || "Unknown Error"}'
+            WHERE id = ${listOfMessages.wm_id}
+        `;
+        await pool.query(updateStatusQuery);
     }
-});
+};
 
-client.on('message_revoke_me', async (msg) => {
-    // Fired whenever a message is only deleted in your own view.
-    console.log(msg.body); // message before it was deleted.
-});
-
-client.on('message_ack', (msg, ack) => {
-    /*
-        == ACK VALUES ==
-        ACK_ERROR: -1
-        ACK_PENDING: 0
-        ACK_SERVER: 1
-        ACK_DEVICE: 2
-        ACK_READ: 3
-        ACK_PLAYED: 4
-    */
-
-    if (ack == 3) {
-        // The message was read
+// Start server
+const startServer = async () => {
+    try {
+        await connectDB();
+        const PORT = process.env.PORT || 8080;
+        app.listen(PORT, () => {
+            console.log(`Server is running on port ${PORT}`);
+            console.log(
+                `Environment: ${process.env.NODE_ENV || "development"}`
+            );
+        });
+    } catch (error) {
+        console.error("Failed to start server:", error);
+        process.exit(1);
     }
-});
+};
 
-client.on('group_join', (notification) => {
-    // User has joined or been added to the group.
-    console.log('join', notification);
-    notification.reply('User joined.');
-});
-
-client.on('group_leave', (notification) => {
-    // User has left or been kicked from the group.
-    console.log('leave', notification);
-    notification.reply('User left.');
-});
-
-client.on('group_update', (notification) => {
-    // Group picture, subject or description has been updated.
-    console.log('update', notification);
-});
-
-client.on('change_state', state => {
-    console.log('CHANGE STATE', state);
-});
-
-// Change to false if you don't want to reject incoming calls
-let rejectCalls = true;
-
-client.on('call', async (call) => {
-    console.log('Call received, rejecting. GOTO Line 261 to disable', call);
-    if (rejectCalls) await call.reject();
-    await client.sendMessage(call.from, `[${call.fromMe ? 'Outgoing' : 'Incoming'}] Phone call from ${call.from}, type ${call.isGroup ? 'group' : ''} ${call.isVideo ? 'video' : 'audio'} call. ${rejectCalls ? 'This call was automatically rejected by the script.' : ''}`);
-});
-
-client.on('disconnected', (reason) => {
-    console.log('Client was logged out', reason);
-});
-
-client.on('contact_changed', async (message, oldId, newId, isContact) => {
-    /** The time the event occurred. */
-    const eventTime = (new Date(message.timestamp * 1000)).toLocaleString();
-
-    console.log(
-        `The contact ${oldId.slice(0, -5)}` +
-        `${!isContact ? ' that participates in group ' +
-            `${(await client.getChatById(message.to ?? message.from)).name} ` : ' '}` +
-        `changed their phone number\nat ${eventTime}.\n` +
-        `Their new phone number is ${newId.slice(0, -5)}.\n`);
-
-    /**
-     * Information about the @param {message}:
-     * 
-     * 1. If a notification was emitted due to a group participant changing their phone number:
-     * @param {message.author} is a participant's id before the change.
-     * @param {message.recipients[0]} is a participant's id after the change (a new one).
-     * 
-     * 1.1 If the contact who changed their number WAS in the current user's contact list at the time of the change:
-     * @param {message.to} is a group chat id the event was emitted in.
-     * @param {message.from} is a current user's id that got an notification message in the group.
-     * Also the @param {message.fromMe} is TRUE.
-     * 
-     * 1.2 Otherwise:
-     * @param {message.from} is a group chat id the event was emitted in.
-     * @param {message.to} is @type {undefined}.
-     * Also @param {message.fromMe} is FALSE.
-     * 
-     * 2. If a notification was emitted due to a contact changing their phone number:
-     * @param {message.templateParams} is an array of two user's ids:
-     * the old (before the change) and a new one, stored in alphabetical order.
-     * @param {message.from} is a current user's id that has a chat with a user,
-     * whos phone number was changed.
-     * @param {message.to} is a user's id (after the change), the current user has a chat with.
-     */
-});
-
-client.on('group_admin_changed', (notification) => {
-    if (notification.type === 'promote') {
-        /** 
-          * Emitted when a current user is promoted to an admin.
-          * {@link notification.author} is a user who performs the action of promoting/demoting the current user.
-          */
-        console.log(`You were promoted by ${notification.author}`);
-    } else if (notification.type === 'demote')
-        /** Emitted when a current user is demoted to a regular user. */
-        console.log(`You were demoted by ${notification.author}`);
-});
-
-client.on('group_membership_request', async (notification) => {
-    /**
-     * The example of the {@link notification} output:
-     * {
-     *     id: {
-     *         fromMe: false,
-     *         remote: 'groupId@g.us',
-     *         id: '123123123132132132',
-     *         participant: 'number@c.us',
-     *         _serialized: 'false_groupId@g.us_123123123132132132_number@c.us'
-     *     },
-     *     body: '',
-     *     type: 'created_membership_requests',
-     *     timestamp: 1694456538,
-     *     chatId: 'groupId@g.us',
-     *     author: 'number@c.us',
-     *     recipientIds: []
-     * }
-     *
-     */
-    console.log(notification);
-    /** You can approve or reject the newly appeared membership request: */
-    await client.approveGroupMembershipRequestss(notification.chatId, notification.author);
-    await client.rejectGroupMembershipRequests(notification.chatId, notification.author);
-});
-
-client.on('message_reaction', async (reaction) => {
-    console.log('REACTION RECEIVED', reaction);
-});
-
-client.on('vote_update', (vote) => {
-    /** The vote that was affected: */
-    console.log(vote);
-});
+startServer();
