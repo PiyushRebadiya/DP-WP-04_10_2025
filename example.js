@@ -1089,6 +1089,11 @@ const sentImagesOnWhatsApp = async (listOfMessages, userData) => {
                 `;
                 await pool.query(updateStatusQuery);
 
+                const updateUserSentCountQuery = `
+                update tbl_subscription set wp_limit = wp_limit - 1
+                where user_id = ${listOfMessages.user_id}`;
+                await pool.query(updateUserSentCountQuery);
+
                 return;
 
                 // return res.status(200).json({
@@ -1257,6 +1262,11 @@ const sentImagesOnWhatsApp = async (listOfMessages, userData) => {
             WHERE id = ${listOfMessages.wm_id}
         `;
         await pool.query(updateStatusQuery);
+
+        const updateUserSentCountQuery = `
+        update tbl_subscription set wp_limit = wp_limit - 1
+        where user_id = ${listOfMessages.user_id}`;
+        await pool.query(updateUserSentCountQuery);
     } catch (error) {
         console.error("Error generating media:", error);
         const updateStatusQuery = `
